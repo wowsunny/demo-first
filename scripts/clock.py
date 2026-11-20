@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""每一轮巡检开头运行：现在几点、剩多少时间、过了哪个关口、哪个时间盒超了。
+"""看一眼：项目进行了多久、哪些会话还开着。被叫回来时先运行它。
 
 用法：
-  python3 clock.py              只看时间
+  python3 clock.py              只看
   python3 clock.py --card       同时生成这一份阶段报告的草稿 coord/reports/<序号>.md（序号加一）
-  python3 clock.py --done E1    把 E1 记成已结束：不再提醒它的时间盒，也不再占并行名额
+  python3 clock.py --done E1    把 E1 记成已结束：不再占会话名额
   python3 clock.py --reopen E1  记错了，改回进行中
 
+它不催任何人：节奏由用户掌握。用户自己定过期限的话，这里会顺带显示离期限还有多久。
 退出码：0 成功；2 参数有问题或没找到台账。
 """
 
@@ -18,37 +19,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common as c  # noqa: E402
 
-# 每个阶段一句话：现在该做什么。顺序和关口一致。
-PHASES = [
-    ("kickoff_end", "立项", "发出开工确认，等用户回“开”。"),
-    ("explore_end", "试与建", "探索者试，总建设者搭骨架。探索定稿一个，就落地一个。"),
-    ("freeze", "落地", "探索已截止。还没结论的探索，现在就要它在成、不成、降级方案里选一个。剩下的时间用来落地。"),
-    ("deliver", "收尾", "功能已冻结，只修不加。把监管者的延后清单交给用户挑。"),
-    ("deadline", "交付", "只做交付：在线上链接上逐条走验收项，写交付说明。"),
-]
-GATE_LABELS = [
-    ("kickoff_end", "立项截止"),
-    ("explore_end", "探索截止"),
-    ("freeze", "功能冻结"),
-    ("deliver", "开始交付"),
-    ("deadline", "交付"),
-]
-
-
-def current_phase(now, points):
-    for key, name, hint in PHASES:
-        if now < points[key]:
-            return name, hint
-    return "已过交付时间", "马上交出现有的东西，在交付说明里写明没做完的。"
-
 
 def main():
     c.setup_output()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dir", default=".", help="台账所在的目录（里面有 coord/ 的那一层），默认当前目录")
     parser.add_argument("--card", action="store_true", help="生成阶段报告的草稿，序号加一")
-    parser.add_argument("--done", nargs="+", metavar="编号", help="把这些任务记成已结束")
-    parser.add_argument("--reopen", nargs="+", metavar="编号", help="把这些任务改回进行中")
+    parser.add_argument("--done", nargs="+", metavar="编号", help="把这些会话记成已结束")
+    parser.add_argument("--reopen", nargs="+", metavar="编号", help="把这些会话改回进行中")
     args = parser.parse_args()
 
     ledger = c.load_ledger(args.dir)
@@ -63,92 +41,56 @@ def main():
             briefs[task_id]["status"] = status
             changed = True
             print("%s 已记成%s。" % (task_id, "已结束" if status == "done" else "进行中"))
+    if args.done or args.reopen:
+        print()
 
     tz = c.parse_tz(ledger["tz"])
     now = c.now_in(tz)
     start = c.from_iso(ledger["start"])
-    deadline = c.from_iso(ledger["deadline"])
-    points = {k: c.from_iso(v) for k, v in ledger["gates"].items()}
-    points["deadline"] = deadline
+    deadline = c.from_iso(ledger["deadline"]) if ledger.get("deadline") else None
 
-    if args.done or args.reopen:
-        print()
-
-    if now < start:
-        print("现在 %s（%s）｜还没开始，离开始还有 %s｜总时长 %s"
-              % (c.hm(now, start), ledger["tz"], c.span(start - now), c.span(deadline - start)))
-        phase, hint = "立项", PHASES[0][2]
-        elapsed_text, left_text = "0:00", c.span(deadline - start)
+    running = c.span(now - start) if now >= start else "0:00"
+    if deadline is None:
+        limit = "没有设期限"
+    elif now < deadline:
+        limit = "用户定的期限 %s，还有 %s" % (c.hm(deadline, now), c.span(deadline - now))
     else:
-        phase, hint = current_phase(now, points)
-        if phase == "立项" and briefs:
-            # 已经生成过派工单，说明立项做完了：不再按钟点把阶段报成“立项”。
-            phase, hint = PHASES[1][1], PHASES[1][2]
-        elapsed_text = c.span(now - start)
-        if now < deadline:
-            left_text = c.span(deadline - now)
-            print("现在 %s（%s）｜已用 %s，剩 %s｜总时长 %s"
-                  % (c.hm(now, start), ledger["tz"], elapsed_text, left_text, c.span(deadline - start)))
-        else:
-            left_text = "0:00"
-            print("现在 %s（%s）｜已用 %s，超时 %s｜总时长 %s"
-                  % (c.hm(now, start), ledger["tz"], elapsed_text, c.span(now - deadline), c.span(deadline - start)))
-    print("按时间现在该在：%s。%s" % (phase, hint))
-    print()
-
-    print("关口")
-    for key, label in GATE_LABELS:
-        at = points[key]
-        if now >= at:
-            print("  [过] %s  %s" % (label.ljust(4, "　"), c.hm(at, start)))
-        else:
-            print("  [  ] %s  %s  还有 %s" % (label.ljust(4, "　"), c.hm(at, start), c.span(at - now)))
+        limit = "用户定的期限 %s，已经过了 %s" % (c.hm(deadline, now), c.span(now - deadline))
+    print("现在 %s（%s）｜已进行 %s｜%s" % (c.hm(now, start), ledger["tz"], running, limit))
 
     open_briefs = [(k, v) for k, v in briefs.items() if v.get("status") != "done"]
-    if open_briefs:
+    if not briefs:
+        print("还没开出会话：现在在深聊。聊清楚了就定分工，发分工确认。")
+    elif open_briefs:
         print()
-        print("没结束的任务")
-        open_briefs.sort(key=lambda kv: kv[1].get("box_end") or "9999")
+        print("没结束的会话")
         for task_id, info in open_briefs:
-            role = c.ROLE_NAMES.get(info.get("role"), info.get("role", ""))
-            line = "  %s  %s  %s" % (task_id, role, info.get("title", ""))
-            if info.get("box_end"):
-                end = c.from_iso(info["box_end"])
-                if now >= end:
-                    line += "｜时间盒到 %s，已超 %s" % (c.hm(end, start), c.span(now - end))
-                    if info.get("role") == "explorer":
-                        line += " ← 发消息要它三选一：成、不成、降级方案"
-                    elif info.get("role") == "lead-builder":
-                        # 总建设者要留到交付负责发布，所以过了时间盒也不算“该结束了”。
-                        line += " ← 骨架和接入位该交了，没交就读它的回报"
-                    else:
-                        line += " ← 读它的回报，看卡在哪"
-                else:
-                    line += "｜时间盒到 %s，还有 %s" % (c.hm(end, start), c.span(end - now))
+            name = info.get("name") or c.session_name(ledger, info.get("role", ""), info.get("title", ""))
+            line = "  %s  %s" % (task_id, name)
+            if info.get("created"):
+                line += "｜开了 %s" % c.span(now - c.from_iso(info["created"]))
             print(line)
-        print("  （任务结束后运行 clock.py --done <编号>，它就不再出现在这里）")
+        print("  （会话结束后运行 clock.py --done <编号>，它就不再出现在这里）")
+    else:
+        print("会话都结束了。")
 
-    caps = ledger.get("caps", {})
-    if caps.get("explorers"):
-        running = {"explorer": 0, "builder": 0, "supervisor": 0}
+    if briefs:
+        counts = {"explorer": 0, "builder": 0, "supervisor": 0}
         for _, info in open_briefs:
             role = info.get("role", "")
             key = "builder" if role.endswith("builder") else role
-            if key in running:
-                running[key] += 1
+            if key in counts:
+                counts[key] += 1
+        cap = ledger.get("caps", {}).get("explorers")
+        explorers = ("%d/%d" % (counts["explorer"], cap)) if cap else str(counts["explorer"])
         print()
-        print("在跑：探索者 %d/%d，建设者 %d/%d，监管者 %d/%d"
-              % (running["explorer"], caps["explorers"], running["builder"], caps["builders"],
-                 running["supervisor"], caps["supervisors"]))
+        print("在跑：探索者 %s，建设者 %d/1，监管者 %d/1" % (explorers, counts["builder"], counts["supervisor"]))
 
     if args.card:
         ledger["report_seq"] = int(ledger.get("report_seq", 0)) + 1
         changed = True
         seq = ledger["report_seq"]
-        if now >= deadline:
-            header = "【阶段报告 #%d｜已用 %s，已超时 %s｜阶段：%s】" % (seq, elapsed_text, c.span(now - deadline), phase)
-        else:
-            header = "【阶段报告 #%d｜已用 %s，剩 %s｜阶段：%s】" % (seq, elapsed_text, left_text, phase)
+        header = "【阶段报告 #%d｜%s｜已进行 %s】" % (seq, c.hm(now, start), running)
         # 报告先写成文件：发出前能检查，发出后留在台账里，接手的人看得到之前跟用户说过什么。
         rel = "%s/reports/%d.md" % (c.LEDGER_DIR, seq)
         draft = c.fill(c.read_text(c.TEMPLATE_DIR / "coord" / "REPORT.md"), {"抬头": header})
@@ -164,6 +106,7 @@ def main():
 
     if changed:
         c.save_ledger(args.dir, ledger)
+    c.refresh_progress(args.dir)  # 顺手把全景更新一遍：分工表里新记的链接、刚结束的会话都反映进去
 
 
 if __name__ == "__main__":

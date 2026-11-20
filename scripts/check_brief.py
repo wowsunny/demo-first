@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """发出之前检查：有没有没填的地方、有没有对方看不懂的话、会不会太长。
-派工单、开工确认、阶段报告都用它查；阶段报告另外查行数和“要你做的”的件数。
+派工单、分工确认、阶段报告都用它查；阶段报告另外查行数和“要你做的”的件数。
 
 用法：
   python3 check_brief.py coord/briefs/E1.md
@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common as c  # noqa: E402
 
-# 新任务看不到调度者的对话。出现这些说法，说明派工单在指望一段对方看不到的上下文。
+# 新会话看不到调度者的对话。出现这些说法，说明派工单在指望一段对方看不到的上下文。
 CONTEXT_PHRASES = [
     "见上文", "如上所述", "如前所述", "上面说的", "上面提到", "上文提到", "前面提到", "前面说的",
     "之前说过", "之前讨论", "之前聊过", "刚才说的", "刚才讨论", "我们聊过", "我们讨论过", "按之前的",
@@ -36,8 +36,20 @@ WIDE_WEIGHT = 1.15
 ASCII_PER_TOKEN = 2.5
 
 ROLE_BY_NAME = {v: k for k, v in c.ROLE_NAMES.items()}
-TITLE = re.compile(r"^#\s*派工单\s+([^\s（]+)（(.+?)）")
-CLOCK = re.compile(r"\b\d{1,2}:\d{2}\b")
+def parse_title(first):
+    """派工单的第一行就是会话名：# 项目名 - 角色 - 细分（细分可以没有）。
+
+    返回 {"role_cn": 角色, "title": 细分}；第一行不是这个样子就返回 None。
+    """
+    if not first.startswith("#"):
+        return None
+    parts = [part.strip() for part in first.lstrip("#").strip().split(" - ")]
+    if len(parts) < 2:
+        return None
+    for at, part in enumerate(parts[1:], 1):
+        if part in ROLE_BY_NAME:  # 项目名里自己带“ - ”也认得出来
+            return {"role_cn": part, "title": " - ".join(parts[at + 1:])}
+    return {"role_cn": parts[1], "title": " - ".join(parts[2:])}
 
 # 阶段报告的两条限制。用户同一时刻只顾得上很少的事：
 # 超过 20 行就没人从头读到尾，超过 3 件待办就等于没排先后。
@@ -104,22 +116,25 @@ def check(path):
     problems, hints = [], []
 
     first = next((line for line in lines if line.strip()), "")
-    title = TITLE.match(first)
-    role = ROLE_BY_NAME.get(title.group(2)) if title else None
+    in_briefs = Path(path).parent.name == "briefs"
+    title = parse_title(first)
+    role = ROLE_BY_NAME.get(title["role_cn"]) if title else None
+    if not in_briefs and not role:
+        title = None  # 不在 briefs/ 里、第一行又不是会话名：当成给用户的消息，不按派工单查
     kind = c.ROLE_NAMES.get(role, "一般文件")
 
     for number, line in enumerate(lines, 1):
         for match in c.PLACEHOLDER.finditer(line):
             problems.append("第 %d 行还有没填的 %s。填上它；用不着的整行删掉。" % (number, match.group(0)))
-        if not title:
-            continue  # 只有派工单是发给看不到对话的新任务的；给用户的消息不查这一条
+        if not title and not in_briefs:
+            continue  # 只有派工单是发给看不到对话的新会话的；给用户的消息不查这一条
         lowered = line.lower()
         for phrase in CONTEXT_PHRASES:
             if phrase in lowered:
-                problems.append("第 %d 行写了“%s”。新任务看不到你的对话，把指的那段内容原文抄进来。" % (number, phrase))
+                problems.append("第 %d 行写了“%s”。新会话看不到你的对话，把指的那段内容原文抄进来。" % (number, phrase))
 
-    if Path(path).parent.name == "briefs" and not title:
-        problems.append("第一行要是“# 派工单 <编号>（<角色>）：<标题>”，现在认不出这是给谁的派工单。照模板改回来。")
+    if in_briefs and not title:
+        problems.append("第一行要是会话名“# <项目名> - <角色> - <细分>”，现在认不出这是给谁的派工单。照模板改回来。")
 
     if first.strip().startswith(REPORT_HEAD):
         kind = "阶段报告"
@@ -128,7 +143,9 @@ def check(path):
         hints += more_hints
 
     if title and not role:
-        problems.append("第一行的角色“%s”不认识。只能是：探索者、总建设者、落地建设者、监管者。" % title.group(2))
+        problems.append("第一行的角色“%s”不认识。只能是：探索者、建设者、监管者。" % title["role_cn"])
+    if role == "explorer" and not title["title"]:
+        problems.append("探索者的会话名要有第三段（细分），说明它试的是什么。")
 
     if role:
         found = sections(text)
@@ -137,21 +154,20 @@ def check(path):
         if template.exists():
             for name, _, _ in sections(c.read_text(template)):
                 if name not in have:
-                    problems.append("少了“## %s”一节。这一节是给新任务定规矩的，不能删；从模板里补回来。" % name)
+                    problems.append("少了“## %s”一节。这一节是给新会话定规矩的，不能删；从模板里补回来。" % name)
         for name, (body, at) in have.items():
             if not body:
                 problems.append("第 %d 行“## %s”下面是空的。" % (at, name))
-        if "时间盒" in have and not CLOCK.search(have["时间盒"][0]):
-            problems.append("“## 时间盒”里没有具体的钟点。写成“到 15:10 必须……”，新任务才知道什么时候该收。")
         if role == "explorer":
             for name, (body, at) in have.items():
                 if name.startswith("你要回答的问题"):
                     marks = body.count("？") + body.count("?")
                     if marks > 1:
                         hints.append("第 %d 行起“%s”里有 %d 个问号。一个探索者只回答一个问题；"
-                                     "确实是两个互不依赖的问题，就拆成两个探索者。" % (at, name, marks))
-        if role != "lead-builder" and "不发布" not in text:
-            problems.append("全文没有“不发布”。除了总建设者，谁都不该发布正式站；从模板里把这条规矩补回来。")
+                                     "两个问题分不开（改这边、那边必须跟着改），就合成一句来问；"
+                                     "分得开，就各开一个探索者。" % (at, name, marks))
+        if role != "builder" and "不发布" not in text:
+            problems.append("全文没有“不发布”。除了建设者，谁都不该发布正式站；从模板里把这条规矩补回来。")
 
     tokens = estimate_tokens(text)
     if tokens > TOKEN_LIMIT:

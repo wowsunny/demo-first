@@ -18,10 +18,22 @@ PLACEHOLDER = re.compile(r"\{\{(.+?)\}\}")
 
 ROLE_NAMES = {
     "explorer": "探索者",
-    "lead-builder": "总建设者",
-    "landing-builder": "落地建设者",
+    "builder": "建设者",
     "supervisor": "监管者",
 }
+
+
+def project_name(ledger):
+    """项目短名：所有会话的名字都用它开头。老台账里没有，就取目标的前十个字。"""
+    return ledger.get("name") or ledger.get("goal", "")[:10]
+
+
+def session_name(ledger, role, title=""):
+    """会话名：项目名 - 角色 - 细分。没有细分就只有前两段。"""
+    parts = [project_name(ledger), ROLE_NAMES.get(role, role)]
+    if title:
+        parts.append(title)
+    return " - ".join(parts)
 
 
 def setup_output():
@@ -141,8 +153,8 @@ def load_ledger(base):
     if not path.exists():
         die(
             "没找到 %s。\n"
-            "  还没立项：先运行 init_ledger.py。\n"
-            "  已经立项：用 --dir 指到台账所在的目录（里面有 coord/ 的那一层）。" % path
+            "  还没建台账：先运行 init_ledger.py。\n"
+            "  已经建了：用 --dir 指到台账所在的目录（里面有 coord/ 的那一层）。" % path
         )
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -175,6 +187,18 @@ def fill(text, values):
     return PLACEHOLDER.sub(repl, text)
 
 
+def embed_text(text):
+    """把一个独立的 Markdown 文件整理成能嵌进别的文件的样子。"""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("# ") or line.startswith(">"):
+            continue  # 去掉总标题和写给读这个文件的人自己的备注
+        if line.startswith("#"):
+            line = "#" + line  # 标题降一级，免得和外层文件自己的小节混在一起
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def charter_text(base):
     """读 coord/CHARTER.md，整理成能嵌进别的文件的样子。
 
@@ -184,19 +208,13 @@ def charter_text(base):
     if not path.exists():
         return None, []
     text = read_text(path)
-    lines = []
-    for line in text.splitlines():
-        if line.startswith("# ") or line.startswith(">"):
-            continue  # 去掉总标题和写给调度者自己的备注
-        if line.startswith("#"):
-            line = "#" + line  # 标题降一级，免得和外层文件自己的小节混在一起
-        lines.append(line)
-    return "\n".join(lines).strip(), placeholders(text)
+    return embed_text(text), placeholders(text)
 
 
 def board_tasks(base):
-    """从 coord/BOARD.md 的任务表里读出任务，返回 [(编号, 角色, 要做的事)]，不含调度者自己。
+    """从 coord/BOARD.md 的分工表里读出会话，不含调度者自己。
 
+    返回 [{"id": 编号, "role": 角色, "title": 细分, "what": 要做的事, "link": 任务链接}]。
     表被改得认不出来时返回 None，由调用方提示手工填。
     """
     path = Path(base) / LEDGER_DIR / "BOARD.md"
@@ -222,6 +240,13 @@ def board_tasks(base):
     what_at = next((i for i, name in enumerate(header) if name.startswith("要回答的问题")), None)
     if what_at is None:
         return None
+    # “细分”和“任务链接”两列是后加的，没有也认。
+    title_at = header.index("细分") if "细分" in header else None
+    link_at = header.index("任务链接") if "任务链接" in header else None
+
+    def cell(cells, at):
+        return cells[at] if at is not None and at < len(cells) else ""
+
     tasks = []
     for cells in rows:
         if len(cells) <= max(id_at, role_at, what_at):
@@ -229,25 +254,46 @@ def board_tasks(base):
         task_id, role, what = cells[id_at], cells[role_at], cells[what_at]
         if not task_id or task_id == "D" or role == "调度者":
             continue
-        tasks.append((task_id, role, what))
+        tasks.append({"id": task_id, "role": role, "title": cell(cells, title_at),
+                      "what": what, "link": cell(cells, link_at)})
     return tasks
 
 
-def board_queue(base):
-    """coord/BOARD.md 里“排队”一节下面的条目。"""
+def board_list(base, section):
+    """coord/BOARD.md 里某一节（按标题开头认）下面的条目。"""
     path = Path(base) / LEDGER_DIR / "BOARD.md"
     if not path.exists():
         return []
     items, inside = [], False
     for line in read_text(path).splitlines():
         if line.startswith("## "):
-            inside = line[3:].strip().startswith("排队")
+            inside = line[3:].strip().startswith(section)
             continue
         if inside and line.strip().startswith("- "):
             item = line.strip()[2:].strip()
             if item:
                 items.append(item)
     return items
+
+
+def role_key(role_cn):
+    """把分工表里写的角色（探索者、建设者、监管者）换成脚本里用的名字。认不出来返回 None。"""
+    for key, name in ROLE_NAMES.items():
+        if role_cn.startswith(name):
+            return key
+    return None
+
+
+def refresh_progress(base):
+    """重新生成全景（coord/PROGRESS.md 和 coord/progress.html）。
+
+    全景只是给用户看的出口，它出了错不该拦住正事，所以只提醒一句。
+    """
+    try:
+        import progress  # 和本文件在同一个目录
+        progress.rebuild(Path(base) / LEDGER_DIR)
+    except Exception as exc:  # noqa: BLE001
+        print("提醒：全景没能更新（%s）。不影响别的。" % exc)
 
 
 def placeholders(text):
@@ -260,23 +306,15 @@ def placeholders(text):
     return seen
 
 
-def time_values(ledger, now=None):
-    """各模板都会用到的时间字段。"""
+def base_values(ledger):
+    """各模板都会用到的字段。
+
+    里面没有期限：节奏由用户掌握，期限只显示在全景页上给用户看，不写进任何发给会话的文字。
+    """
     tz = parse_tz(ledger["tz"])
-    start = from_iso(ledger["start"])
-    gates = {k: from_iso(v) for k, v in ledger["gates"].items()}
-    deadline = from_iso(ledger["deadline"])
     values = {
         "目标": ledger["goal"],
         "项目一句话": ledger["goal"],
-        "时区": ledger["tz"],
-        "开始": hm(start, start),
-        "立项截止": hm(gates["kickoff_end"], start),
-        "探索截止": hm(gates["explore_end"], start),
-        "功能冻结": hm(gates["freeze"], start),
-        "开始交付": hm(gates["deliver"], start),
-        "交付时间": hm(deadline, start),
+        "项目名": project_name(ledger),
     }
-    if now is not None:
-        values["现在"] = hm(now, start)
     return values, tz
