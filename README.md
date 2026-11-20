@@ -22,7 +22,7 @@ demo-first 就是为这种处境设计的：**token 相对宽裕，人的精力�
 
 | 平台 | 状态 |
 |---|---|
-| Manus | 已按现在的流程适配，还没有在真实账号上完整跑过。它依赖的平台行为里，有几处官方文档没写清楚，其中任务内部开子代理的工具在官方文档里完全找不到，只实测过一次。实测步骤在 [`tests/manus-mechanics.md`](tests/manus-mechanics.md) |
+| Manus | 已按现在的流程适配。它依赖的几条平台机制在 Windows 桌面应用里实测过：开任务时指定名字和档位、附任务引用、各任务共用本机文件夹、任务内部开子代理。整套流程还没有连起来跑过；网页版和云端的任务没测。任务内部开子代理的工具在官方文档里找不到，别的账号上不一定有。实测步骤和结果在 [`tests/manus-mechanics.md`](tests/manus-mechanics.md) |
 | Claude Code | 适配文件还停在上一版的流程，开头写明了在它更新之前怎么用。上一版用后台子代理实跑过三轮，见 [`tests/claude-code-trial.md`](tests/claude-code-trial.md) |
 | Codex | 在支持列表里，还没做 |
 
