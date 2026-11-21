@@ -2,18 +2,23 @@
 # -*- coding: utf-8 -*-
 """生成一份要发出去的草稿，已知的内容先填好，剩下的 {{…}} 由你来填。
 
-分工确认（发给用户，写完 CHARTER.md 和 BOARD.md 之后运行）：
+分工确认（发给用户，写完 CHARTER.md、BOARD.md、CONTEXT.md 之后运行）：
   python3 new_brief.py kickoff                      生成 coord/KICKOFF.md
 
-派工单（发给新会话，生成到 coord/briefs/<编号>.md）。顺序：探索者 → 建设者 → 监管者：
-  python3 new_brief.py explorer E1 "发言节奏"       探索者必须写细分
+派工单（发给新会话，生成到 coord/briefs/<编号>.md）：
   python3 new_brief.py builder B1                   建设者只有一个，细分可以不写
+  python3 new_brief.py explorer E1 "发言节奏"       探索者必须写细分
   python3 new_brief.py supervisor S1
 
-每份派工单生成后，脚本会给出三样，开任务时照着指定：
+先开谁，看各会话是不是共用一个文件夹（台账里记着，init_ledger.py 定的，也能用它改）：
+  共用      建设者 → 探索者 → 监管者。建设者的活最长，文件它都读得到，不用等探索者先开出来
+  不共用    探索者 → 建设者 → 监管者。后开的要引用先开的：每开一个就把任务链接记进 BOARD.md，再生成下一份
+
+每份派工单生成后，脚本会给出开任务时要照着指定的几样：
   会话名      项目短名 - 角色 - 细分
-  思考强度    默认探索者、建设者超高，监管者极致；要改用 --effort
-  要附什么    后开的会话要引用先开的，所以每开一个就把任务链接记进 BOARD.md，再生成下一份
+  思考强度    默认探索者、建设者高，监管者超高；要改用 --effort
+  要附什么    共用文件夹时不用附；不共用时附深聊纪要、初始设定和先开的任务
+  第一条消息  共用文件夹时只发三行（派工单的路径），脚本会打印出来；不共用时发派工单全文
 同名文件已存在时不覆盖，除非加 --force。超过会话上限时不生成，除非加 --over-cap。
 
 退出码：0 成功；2 参数有问题、没找到台账、前置文件没写完、同名文件已存在，或超过会话上限。
@@ -36,8 +41,24 @@ ALIASES = {
 }
 RETIRED = ("landing-builder", "landing", "落地建设者")
 
-# 这两个角色要拿初始设定当基准，所以把全文嵌进派工单。
+# 深聊纪要（coord/CONTEXT.md）和初始设定（coord/CHARTER.md）是所有会话共同的底子。
+# 它们不嵌进派工单：嵌进去的那份会过时，中等大小的项目还会把派工单撑过一条消息的上限。
+# 各会话共用文件夹时直接读文件；各有各的机器时作为文件附上，附不了就作为第二条消息发。
+CONTEXT_SHARED = ("项目的来龙去脉在 `coord/CONTEXT.md`（深聊纪要），定下来的结论在 `coord/CHARTER.md`（初始设定）。"
+                  "动手前把这两份读完。它们和这份派工单对不上时，先问用户")
+CONTEXT_ATTACHED = ("深聊纪要（`CONTEXT.md`）和初始设定（`CHARTER.md`）已经作为文件附给你：前一份讲项目的来龙去脉，"
+                    "后一份是定下来的结论。动手前把这两份读完。没收到，就在第一条回复里说一句“没收到深聊纪要”，照这份派工单先做")
+# 建设者和监管者要拿初始设定当基准，派工单里专门有一节说它在哪。
 NEEDS_CHARTER = ("builder", "supervisor")
+CHARTER_SHARED = ("初始设定在 `coord/CHARTER.md`。现在就读一遍；以后每次都以文件里的为准："
+                  "用户改了它，调度者会更新这个文件。")
+CHARTER_ATTACHED = ("初始设定（`CHARTER.md`）已经作为文件附给你。现在就读一遍；用户之后发来新版时，以新版为准。"
+                    "没收到，就在第一条回复里说一句“没收到初始设定”。")
+NOTES_FILE = "notes-shared-folder.md"
+# 建设者派工单里的“接口约定”。共用文件夹时指向文件；不共用时它读不到 BOARD.md，留给调度者抄进来。
+INTERFACES_SHARED = ("在 `coord/BOARD.md` 的“接口约定”一节，以它为准：每个探索接进哪里，输入、输出是什么。"
+                     "那里没写到的由你定，写进 `coord/ARCHITECTURE.md`")
+INTERFACES_COPIED = "{{从 BOARD.md 的“接口约定”抄：每个探索接进哪里，输入、输出是什么。没有就写“由你定，写进 ARCHITECTURE.md”}}"
 
 # 思考强度分四档，各平台叫法不同，生成派工单时一并说出来，免得再去翻适配文件。
 # 一律写明、不用平台的默认档：有的平台默认继承开它的会话（太重），有的默认最低档（太轻）。
@@ -53,9 +74,9 @@ EFFORT_ON_PLATFORM = {
     "超高": "Manus 是 Max 的超高档 max-extra；Claude Code 是 xhigh",
     "极致": "Manus 是 Max 的极致档 max-ultra；Claude Code 是 max",
 }
-# 探索者和建设者要把用户的要求吃透、再组织子代理去做，用超高。
-# 监管者用极致：它的用处就是找出别的会话和子代理想得不够深留下的问题。
-DEFAULT_EFFORT = {"explorer": "超高", "builder": "超高", "supervisor": "极致"}
+# 默认档位是作者拍板的起点，没有数据：探索者、建设者用高；监管者用超高，
+# 它的用处就是找出别的会话和子代理想得不够深留下的问题；调度者由用户开任务时自己选，建议极致。
+DEFAULT_EFFORT = {"explorer": "高", "builder": "高", "supervisor": "超高"}
 
 CHECKER = Path(__file__).resolve().parent / "check_brief.py"
 
@@ -94,10 +115,12 @@ def session_lines(base, ledger, only=None, skip=None):
     """从分工表里列出会话，一行一个：编号｜会话名｜要做的事｜任务链接。
 
     返回 (行, 没记链接的编号)。分工表认不出来时返回 (None, [])。
+    各会话共用文件夹时不靠链接互相读，没记链接的那一行就不带链接，也不算缺。
     """
     tasks = c.board_tasks(base)
     if tasks is None:
         return None, []
+    shared = c.is_shared(ledger)
     lines, no_link = [], []
     for task in tasks:
         key = c.role_key(task["role"])
@@ -105,10 +128,10 @@ def session_lines(base, ledger, only=None, skip=None):
             continue
         name = c.session_name(ledger, key or task["role"], task["title"])
         link = task["link"]
-        if not link:
+        if not link and not shared:
             no_link.append(task["id"])
             link = "（链接还没记）"
-        lines.append("- %s｜%s｜%s｜%s" % (task["id"], name, task["what"], link))
+        lines.append("｜".join(part for part in ("- " + task["id"], name, task["what"], link) if part))
     return lines, no_link
 
 
@@ -138,6 +161,16 @@ def make_kickoff(base, ledger, force):
     if missing:
         c.die("coord/CHARTER.md 还没写完，里面还有 %d 处 {{…}}，例如 %s。写完再生成分工确认。"
               % (len(missing), missing[0]))
+
+    # 深聊纪要是所有会话共同的背景，要在用户确认分工之前写好：用户能顺便看一眼归纳得对不对。
+    context_at = base / c.LEDGER_DIR / "CONTEXT.md"
+    found, missing = c.context_state(base)
+    if not found:
+        c.write_text(context_at, c.fill(c.read_text(c.TEMPLATE_DIR / "coord" / "CONTEXT.md"), c.base_values(ledger)[0]))
+        c.die("还没有 coord/CONTEXT.md（深聊纪要）。已经照模板建了一份：把深聊的来龙去脉归纳进去，再生成分工确认。")
+    if missing:
+        c.die("coord/CONTEXT.md（深聊纪要）还没写完，里面还有 %d 处 {{…}}，例如 %s。"
+              "所有会话开工前都要读它：写完再生成分工确认。" % (len(missing), missing[0]))
 
     tasks = c.board_tasks(base)
     if tasks is None:
@@ -204,21 +237,27 @@ def make_brief(base, ledger, role, task_id, title, force, over_cap, effort=None)
     values, tz = c.base_values(ledger)
     now = c.now_in(tz)
     notes = []
+    shared = c.is_shared(ledger)
 
     name = c.session_name(ledger, role, title)
     values.update({
         "任务名": name, "编号": task_id, "python": python_name(),
         "子代理规矩": c.embed_text(c.read_text(rules)),
+        "背景怎么读": CONTEXT_SHARED if shared else CONTEXT_ATTACHED,
+        # 只在共用文件夹时才有的几条须知；不共用时这个位置是空的。
+        "共用文件夹须知": c.role_notes(NOTES_FILE, role) if shared else "",
     })
-    if role in NEEDS_CHARTER:
-        charter, missing = c.charter_text(base)
-        if charter and not missing:
-            values["初始设定全文"] = charter
-        else:
-            notes.append("coord/CHARTER.md 还没写完，初始设定没能自动填进来。先写完它，再加 --force 重新生成。")
+    charter, missing = c.charter_text(base)
+    if charter is None or missing:
+        notes.append("coord/CHARTER.md 还没写完。先写完它，再加 --force 重新生成。")
+    elif role in NEEDS_CHARTER:
+        values["初始设定全文"] = CHARTER_SHARED if shared else CHARTER_ATTACHED
+    found, missing = c.context_state(base)
+    if not found or missing:
+        notes.append("coord/CONTEXT.md（深聊纪要）还没写完。所有会话开工前都要读它：写完再发这份派工单。")
 
     # 建设者要知道有哪些探索在跑，监管者要知道全部会话：从分工表里取，不用再抄一遍。
-    attach = ""
+    attach = []
     if role in ("builder", "supervisor"):
         key = "探索清单" if role == "builder" else "会话清单"
         lines, no_link = session_lines(base, ledger, only="explorer" if role == "builder" else None, skip=task_id)
@@ -231,9 +270,14 @@ def make_brief(base, ledger, role, task_id, title, force, over_cap, effort=None)
                 notes.append("分工表里 %s 的任务链接还没记。先开它们、把链接记进 BOARD.md，再加 --force 重新生成；"
                              "它们确实还没开，就在派工单里把那一行改成“还没开”。" % "、".join(no_link))
         if role == "builder":
-            attach = "把探索者的任务都作为任务引用附上：它落地时要去读移交说明和 demo。"
+            # 接口约定在 BOARD.md 里。共用文件夹时建设者自己读得到，指过去就行，不用再抄一份会过时的。
+            values["接口约定"] = INTERFACES_SHARED if shared else INTERFACES_COPIED
+            attach.append("把探索者的任务都作为任务引用附上：它落地时要去读移交说明和 demo。")
         else:
-            attach = "把其他所有会话的任务、连同你自己这个任务，都作为任务引用附上：它要读得到全部。"
+            attach.append("把其他所有会话的任务、连同你自己这个任务，都作为任务引用附上：它要读得到全部。")
+    attach.append("把 coord/CONTEXT.md 和 coord/CHARTER.md 作为文件附上。附不了：任务开出来之后，把这两份的全文作为第二条消息发过去。")
+    if shared:
+        attach = ["没有。各会话共用这个文件夹，要读的它都读得到。"]
 
     text = c.fill(c.read_text(template), values)
     c.write_text(target, text)
@@ -249,10 +293,19 @@ def make_brief(base, ledger, role, task_id, title, force, over_cap, effort=None)
     c.refresh_progress(base)
 
     print("已生成 %s（%s）" % (rel, c.ROLE_NAMES[role]))
-    print("开任务时照这三样指定，不用平台默认的：")
+    print("开任务时照这几样指定，不用平台默认的：")
     print("  会话名：%s" % name)
     print("  思考强度：%s（%s）" % (effort, EFFORT_ON_PLATFORM[effort]))
-    print("  要附的：%s" % (attach or "没有。"))
+    print("  要附的：%s" % attach[0])
+    for more in attach[1:]:
+        print("          %s" % more)
+    if shared:
+        print("  第一条消息：只发下面三行。派工单是文件，不用发全文")
+        print("    # %s" % name)
+        print("    你的派工单在工作区的 %s。现在把它完整读一遍，照它做。" % rel)
+        print("    读不到这个文件，就只回一句“读不到派工单”，然后停下。")
+    else:
+        print("  第一条消息：派工单全文。检查脚本说一条装不下时，照它的“怎么发”做，不删内容")
     finish(rel, text, notes + ["超过了会话上限，按你的要求照样生成了。"] * bool(over))
 
 

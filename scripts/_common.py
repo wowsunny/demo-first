@@ -95,7 +95,7 @@ def now_in(tz):
 def parse_clock(text, tz, ref, nearest=False):
     """解析用户给的时间。
 
-    认三种写法：2026-11-22 18:30、2026-11-22T18:30、18:30。
+    认三种写法：2026-03-14 18:30、2026-03-14T18:30、18:30。
     只写钟点时要猜是哪一天：
       默认取 ref 之后最近的那一次（交付时间总在开始之后）；
       nearest=True 时取离 ref 最近的那一次（开始时间可能刚过，也可能马上到）。
@@ -120,7 +120,7 @@ def parse_clock(text, tz, ref, nearest=False):
         if dt < ref:
             dt += timedelta(days=1)
         return dt
-    die("看不懂时间“%s”。写成 2026-11-22 18:30 或 18:30。" % text)
+    die("看不懂时间“%s”。写成 2026-03-14 18:30 或 18:30。" % text)
 
 
 def from_iso(text):
@@ -209,6 +209,37 @@ def charter_text(base):
         return None, []
     text = read_text(path)
     return embed_text(text), placeholders(text)
+
+
+def context_state(base):
+    """coord/CONTEXT.md（深聊纪要）写了没有。
+
+    返回 (文件在不在, 还没填的占位列表)。
+    """
+    path = Path(base) / LEDGER_DIR / "CONTEXT.md"
+    if not path.exists():
+        return False, []
+    return True, placeholders(read_text(path))
+
+
+def is_shared(ledger):
+    """各会话是不是共用一个文件夹（台账里记着，init_ledger.py 定的）。"""
+    return bool(ledger.get("shared"))
+
+
+def role_notes(name, role):
+    """从 templates/<name> 里取出给某个角色的那一节（二级标题是角色的中文名），没有就返回空。"""
+    path = TEMPLATE_DIR / name
+    if not path.exists():
+        return ""
+    wanted, lines, inside = ROLE_NAMES.get(role, role), [], False
+    for line in read_text(path).splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip() == wanted
+            continue
+        if inside:
+            lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def board_tasks(base):

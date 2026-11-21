@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""发出之前检查：有没有没填的地方、有没有对方看不懂的话、会不会太长。
+"""发出之前检查：有没有没填的地方、有没有对方看不懂的话；太长的告诉你怎么发。
 派工单、分工确认、阶段报告都用它查；阶段报告另外查行数和“要你做的”的件数。
 
 用法：
@@ -9,9 +9,12 @@
   python3 check_brief.py coord/reports/2.md
 
 退出码：0 全部通过；1 有文件没通过；2 文件不存在。
-“问题”必须改掉再发；“提醒”自己判断要不要改。
+“问题”必须改掉再发；“提醒”自己判断要不要改；“怎么发”照着做。
+派工单太长不算问题，不要为了变短删内容：各会话共用文件夹时（台账里记着）它是文件，对方自己读；
+不共用时，脚本会打印“怎么发”：先当文件附上，附不了就在它说的位置分成几条消息。
 """
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -27,6 +30,8 @@ CONTEXT_PHRASES = [
 ]
 
 # Manus 的接口文档写：一条消息的文字大约限 5000 个估算 token。留一成余量。
+# 派工单超过它不拦、也不让人压短（压短会丢内容，还要来回试好几轮）：内容走文件，
+# 共用文件夹时对方自己读，不共用时当附件发或分成几条发，见 how_to_send。
 TOKEN_LIMIT = 4500
 
 # 估算 token：非 ASCII 字符（汉字、全角标点）每个算 1.15，ASCII 每 2.5 个字符算 1。
@@ -170,13 +175,71 @@ def check(path):
             problems.append("全文没有“不发布”。除了建设者，谁都不该发布正式站；从模板里把这条规矩补回来。")
 
     tokens = estimate_tokens(text)
-    if tokens > TOKEN_LIMIT:
+    how = []
+    if role or in_briefs:
+        # 派工单太长不拦，也不让人压短：内容走文件。
+        if tokens > TOKEN_LIMIT and as_file(path):
+            hints.append("估算约 %d token。派工单是文件，对方自己读，长度不用管：不要为了变短删内容。" % tokens)
+        elif tokens > TOKEN_LIMIT:
+            how = how_to_send(text, path, first.lstrip("#").strip(), tokens)
+    elif tokens > TOKEN_LIMIT:
         problems.append("估算约 %d token，超过了 %d。一条消息装不下：删掉和这个任务无关的事实，"
                         "长的材料改成文件或任务引用。" % (tokens, TOKEN_LIMIT))
     elif tokens > TOKEN_LIMIT * 0.85:
         hints.append("估算约 %d token，快到上限（%d）了。" % (tokens, TOKEN_LIMIT))
 
-    return problems, hints, tokens, kind
+    return problems, hints, tokens, kind, how
+
+
+def how_to_send(text, path, name, tokens):
+    """派工单一条消息装不下时怎么发。返回要打印的几行：先当文件附上，附不了就分成几条。
+
+    分的位置只落在二级标题上：从头往后装，装不下了就在下一个标题前断开。
+    """
+    chunks, at = [], None  # [(标题, 这一块的 token)]，开头到第一个标题之间的那块标题是 None
+    block = []
+    for line in text.splitlines() + ["## "]:
+        if line.startswith("## "):
+            chunks.append((at, estimate_tokens("\n".join(block))))
+            at, block = line.strip(), []
+        block.append(line)
+    cuts, big, used = [], [], 0
+    for heading, size in chunks:
+        if used and used + size > TOKEN_LIMIT:
+            cuts.append(heading)
+            used = 0
+        used += size
+        if size > TOKEN_LIMIT:
+            big.append(heading or "开头")
+    file_name = Path(path).name
+    lines = ["估算约 %d token，一条消息装不下（约 %d）。内容不用删，也不用压短，照下面的发：" % (tokens, TOKEN_LIMIT),
+             "1. 先试当文件发：把 %s 作为附件附上，第一条消息只发这三行：" % file_name,
+             "     # %s" % name,
+             "     你的派工单是附上的文件 %s。现在把它完整读一遍，照它做。" % file_name,
+             "     读不到这个文件，就只回一句“读不到派工单”，然后停下。"]
+    if cuts:
+        lines.append("2. 附不了：分 %d 条消息发，在这几处之前断开：%s。" % (len(cuts) + 1, "、".join("“%s”" % c_ for c_ in cuts)))
+    else:
+        lines.append("2. 附不了：分两条消息发。")
+    if big:
+        lines.append("   %s 这一节自己就超过一条消息：在它里面的空行处再断开。" % "、".join("“%s”" % b for b in big))
+    total = "N" if big else str(len(cuts) + 1 if cuts else 2)
+    lines.append("   第一条的末尾加一句“派工单共 %s 条，全部收到再动手”；后面每条的开头写“派工单第几条”。" % total)
+    return lines
+
+
+def as_file(path):
+    """这份东西是不是让对方自己去读的文件：在 coord/briefs/ 里，而且台账里记着各会话共用文件夹。"""
+    folder = Path(path).resolve().parent
+    if folder.name != "briefs":
+        return False
+    ledger = folder.parent / c.LEDGER_NAME
+    if not ledger.exists():
+        return False
+    try:
+        return c.is_shared(json.loads(ledger.read_text(encoding="utf-8")))
+    except ValueError:
+        return False
 
 
 def main():
@@ -191,7 +254,7 @@ def main():
         path = Path(raw)
         if not path.exists():
             c.die("没找到文件 %s。" % raw)
-        problems, hints, tokens, kind = check(path)
+        problems, hints, tokens, kind, how = check(path)
         if problems:
             failed += 1
             print("没通过：%s（%s，约 %d token）" % (raw, kind, tokens))
@@ -201,6 +264,8 @@ def main():
             print("通过：%s（%s，约 %d token）" % (raw, kind, tokens))
         for item in hints:
             print("  提醒：" + item)
+        for number, item in enumerate(how):
+            print(("  怎么发：" if number == 0 else "    ") + item)
     if failed:
         print("\n改完再运行一次，全部通过了才发。")
         sys.exit(1)
